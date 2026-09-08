@@ -1,5 +1,5 @@
 [package]
-name = "minecraft-auth"
+name = "mc-auth"
 version = "0.1.0"
 edition = "2024"
 

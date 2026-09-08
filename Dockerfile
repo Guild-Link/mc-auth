@@ -9,7 +9,7 @@ RUN cargo build --locked --release
 FROM scratch
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /app/target/release/minecraft-auth /minecraft-auth
+COPY --from=build /app/target/release/mc-auth /mc-auth
 
 USER 65532:65532
-ENTRYPOINT ["/minecraft-auth"]
+ENTRYPOINT ["/mc-auth"]

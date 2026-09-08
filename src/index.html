@@ -89,7 +89,7 @@
       </section>
 
       <section id="complete" hidden>
-        <input id="credential" type="password" readonly />
+        <input id="token" type="password" readonly />
         <button id="show">Show</button>
         <button id="copy">Copy</button>
       </section>
@@ -100,8 +100,8 @@
       This page is not affiliated with Mojang/Microsoft/Minecraft.
     </footer>
     <script>
-      const credential = document.querySelector("#credential");
       const complete = document.querySelector("#complete");
+      const token = document.querySelector("#token");
       const start = document.querySelector("#start");
       const login = document.querySelector("#login");
       const error = document.querySelector("#error");
@@ -140,7 +140,7 @@
           } else if (result.status === "complete") {
             login.hidden = true;
             complete.hidden = false;
-            credential.value = result.credential;
+            token.value = result.token;
           } else {
             throw new Error(result.error);
           }
@@ -153,13 +153,13 @@
       document
         .querySelector("#copy")
         .addEventListener("click", async (event) => {
-          await navigator.clipboard.writeText(credential.value);
+          await navigator.clipboard.writeText(token.value);
           event.target.textContent = "Copied";
         });
 
       document.querySelector("#show").addEventListener("click", (event) => {
-        const hidden = credential.type === "password";
-        credential.type = hidden ? "text" : "password";
+        const hidden = token.type === "password";
+        token.type = hidden ? "text" : "password";
         event.target.textContent = hidden ? "Hide" : "Show";
       });
 

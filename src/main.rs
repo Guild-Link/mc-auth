@@ -25,15 +25,21 @@ struct AppState {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum AuthStatus {
     Pending,
-    Complete { credential: String },
     Failed { error: String },
+    Complete { token: String },
 }
 
 #[derive(Serialize)]
 struct StartResponse {
     session: Uuid,
-    verification_uri: String,
     user_code: String,
+    verification_uri: String,
+}
+
+#[derive(Serialize)]
+struct AccountToken {
+    uuid: Uuid,
+    token: String,
 }
 
 #[tokio::main]
@@ -83,8 +89,9 @@ async fn start_auth(
         .insert(session, AuthStatus::Pending);
     tokio::spawn(async move {
         let status = match azalea_auth::get_ms_auth_token(&state.client, code, None).await {
-            Ok(msa) => encode_credential(msa)
-                .map(|credential| AuthStatus::Complete { credential })
+            Ok(msa) => encode_token(&state.client, msa)
+                .await
+                .map(|token| AuthStatus::Complete { token })
                 .unwrap_or_else(|error| AuthStatus::Failed { error }),
             Err(error) => AuthStatus::Failed {
                 error: error.to_string(),
@@ -115,7 +122,27 @@ async fn auth_status(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(status)))
 }
 
-fn encode_credential(msa: ExpiringValue<AccessTokenResponse>) -> Result<String, String> {
-    let json = serde_json::to_vec(&msa).map_err(|error| error.to_string())?;
+async fn encode_token(
+    client: &reqwest::Client,
+    msa: ExpiringValue<AccessTokenResponse>,
+) -> Result<String, String> {
+    let minecraft = azalea_auth::get_minecraft_token(client, &msa.data.access_token)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let profile = azalea_auth::get_profile(client, &minecraft.minecraft_access_token)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let token = encode(&msa)?;
+
+    encode(&AccountToken {
+        uuid: profile.id,
+        token,
+    })
+}
+
+fn encode(value: &impl Serialize) -> Result<String, String> {
+    let json = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     Ok(URL_SAFE_NO_PAD.encode(json))
 }
