@@ -86,6 +86,7 @@
       </section>
 
       <section id="complete" hidden>
+        <p id="encryption-status" style="text-align: center"></p>
         <input id="token" type="password" readonly />
         <button id="show">Show</button>
         <button id="copy">Copy</button>
@@ -140,6 +141,16 @@
             login.hidden = true;
             complete.hidden = false;
             token.value = result.token;
+
+            const encrypted = new URLSearchParams(location.search).has(
+              "pubKey",
+            );
+
+            const status = document.querySelector("#encryption-status");
+            status.style.color = encrypted ? "#6bd968" : "#ff8b8b";
+            status.textContent = encrypted
+              ? "This token is encrypted."
+              : "This token is NOT encrypted!";
           } else {
             throw new Error(result.error);
           }
