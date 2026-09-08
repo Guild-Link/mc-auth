@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Minecraft Token Fetcher</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        min-height: 100vh;
+        max-width: 36rem;
+        margin: 0 auto;
+        padding: 0 1.25rem;
+        background: #111;
+        color: #eee;
+        display: grid;
+        grid-template-rows: 1fr auto;
+        box-sizing: border-box;
+      }
+      main {
+        align-self: center;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 1.5rem;
+        background: #191919;
+      }
+      h1 {
+        margin: 0 0 1.5rem;
+        font-size: 1.4rem;
+        text-align: center;
+      }
+      button,
+      a {
+        color: inherit;
+      }
+      button {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        border: 0;
+        border-radius: 4px;
+        background: #3c8527;
+        cursor: pointer;
+      }
+      .code {
+        margin: 1.25rem 0;
+        font: 1.8rem monospace;
+        letter-spacing: 0.12em;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        margin: 0.5rem 0;
+        padding: 0.75rem;
+      }
+      #show {
+        margin-bottom: 0.5rem;
+        background: #333;
+      }
+      footer {
+        padding: 1rem 0;
+        color: #888;
+        font-size: 0.75rem;
+        text-align: center;
+      }
+      [hidden] {
+        display: none;
+      }
+      #error {
+        color: #ff8b8b;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Minecraft Token Fetcher</h1>
+      <button id="start">Login With Microsoft</button>
+
+      <section id="login" hidden>
+        <p>
+          Open
+          <a id="link" target="_blank" rel="noreferrer">Microsoft sign-in</a>
+          and enter:
+        </p>
+        <div id="code" class="code"></div>
+        <p>Waiting for authentication...</p>
+      </section>
+
+      <section id="complete" hidden>
+        <input id="credential" type="password" readonly />
+        <button id="show">Show</button>
+        <button id="copy">Copy</button>
+      </section>
+
+      <p id="error" hidden></p>
+    </main>
+    <footer>
+      This page is not affiliated with Mojang/Microsoft/Minecraft.
+    </footer>
+    <script>
+      const credential = document.querySelector("#credential");
+      const complete = document.querySelector("#complete");
+      const start = document.querySelector("#start");
+      const login = document.querySelector("#login");
+      const error = document.querySelector("#error");
+
+      start.addEventListener("click", async () => {
+        start.hidden = true;
+        error.hidden = true;
+        try {
+          const response = await fetch("/auth", { method: "POST" });
+          if (!response.ok) throw new Error(await response.text());
+
+          const auth = await response.json();
+          const verificationUrl = new URL(auth.verification_uri);
+          verificationUrl.searchParams.set("otc", auth.user_code);
+
+          document.querySelector("#link").href = verificationUrl;
+          document.querySelector("#code").textContent = auth.user_code;
+
+          login.hidden = false;
+          window.open(verificationUrl, "_blank", "noopener");
+          poll(auth.session);
+        } catch (cause) {
+          showError(cause);
+          start.hidden = false;
+        }
+      });
+
+      async function poll(session) {
+        try {
+          const response = await fetch(`/auth/${session}`);
+          if (!response.ok) throw new Error(await response.text());
+
+          const result = await response.json();
+          if (result.status === "pending") {
+            setTimeout(() => poll(session), 2000);
+          } else if (result.status === "complete") {
+            login.hidden = true;
+            complete.hidden = false;
+            credential.value = result.credential;
+          } else {
+            throw new Error(result.error);
+          }
+        } catch (cause) {
+          showError(cause);
+          start.hidden = false;
+        }
+      }
+
+      document
+        .querySelector("#copy")
+        .addEventListener("click", async (event) => {
+          await navigator.clipboard.writeText(credential.value);
+          event.target.textContent = "Copied";
+        });
+
+      document.querySelector("#show").addEventListener("click", (event) => {
+        const hidden = credential.type === "password";
+        credential.type = hidden ? "text" : "password";
+        event.target.textContent = hidden ? "Hide" : "Show";
+      });
+
+      function showError(cause) {
+        error.textContent = cause.message || String(cause);
+        error.hidden = false;
+      }
+    </script>
+  </body>
+</html>
