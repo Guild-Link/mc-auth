@@ -2,17 +2,23 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse},
     routing::{get, post},
 };
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::Serialize;
+use base64::{Engine, engine::general_purpose::STANDARD};
+use flate2::{Compression, write::GzEncoder};
+use hpke::{
+    Deserializable, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
+    kem::X25519HkdfSha256, setup_sender,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+type RecipientKey = <X25519HkdfSha256 as hpke::Kem>::PublicKey;
 const RESULT_TTL: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
@@ -34,6 +40,12 @@ struct StartResponse {
     session: Uuid,
     user_code: String,
     verification_uri: String,
+}
+
+#[derive(Deserialize)]
+struct StartQuery {
+    #[serde(rename = "pubKey")]
+    pub_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -70,7 +82,15 @@ async fn index() -> Html<&'static str> {
 
 async fn start_auth(
     State(state): State<AppState>,
+    Query(query): Query<StartQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let public_key = query
+        .pub_key
+        .as_deref()
+        .map(parse_public_key)
+        .transpose()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+
     let code = azalea_auth::get_ms_link_code(&state.client, None, None)
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
@@ -89,7 +109,7 @@ async fn start_auth(
         .insert(session, AuthStatus::Pending);
     tokio::spawn(async move {
         let status = match azalea_auth::get_ms_auth_token(&state.client, code, None).await {
-            Ok(msa) => encode_token(&state.client, msa)
+            Ok(msa) => encode_token(&state.client, msa, public_key.as_ref())
                 .await
                 .map(|token| AuthStatus::Complete { token })
                 .unwrap_or_else(|error| AuthStatus::Failed { error }),
@@ -125,6 +145,7 @@ async fn auth_status(
 async fn encode_token(
     client: &reqwest::Client,
     msa: ExpiringValue<AccessTokenResponse>,
+    public_key: Option<&RecipientKey>,
 ) -> Result<String, String> {
     let minecraft = azalea_auth::get_minecraft_token(client, &msa.data.access_token)
         .await
@@ -134,15 +155,55 @@ async fn encode_token(
         .await
         .map_err(|error| error.to_string())?;
 
-    let token = encode(&msa)?;
+    let token = serde_json::to_vec(&msa).map_err(|error| error.to_string())?;
+    let token = match public_key {
+        Some(public_key) => encrypt(&token, &profile.id, public_key)?,
+        None => STANDARD.encode(token),
+    };
 
-    encode(&AccountToken {
+    encode_compressed(&AccountToken {
         uuid: profile.id,
         token,
     })
 }
 
-fn encode(value: &impl Serialize) -> Result<String, String> {
-    let json = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    Ok(URL_SAFE_NO_PAD.encode(json))
+fn encode_compressed(value: &impl Serialize) -> Result<String, String> {
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
+    serde_json::to_writer(&mut gzip, value).map_err(|error| error.to_string())?;
+    
+    let compressed = gzip.finish().map_err(|error| error.to_string())?;
+    Ok(STANDARD.encode(compressed))
+}
+
+fn parse_public_key(encoded: &str) -> Result<RecipientKey, String> {
+    if encoded.len() != 64 || !encoded.is_ascii() {
+        return Err("pubKey must be a 64-character hexadecimal X25519 public key".into());
+    }
+
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "pubKey must be a 64-character hexadecimal X25519 public key")?;
+    }
+
+    RecipientKey::from_bytes(&bytes).map_err(|error| error.to_string())
+}
+
+fn encrypt(token: &[u8], uuid: &Uuid, public_key: &RecipientKey) -> Result<String, String> {
+    let (encapped_key, mut sender) =
+        setup_sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+            &OpModeS::Base,
+            public_key,
+            b"",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let ciphertext = sender
+        .seal(token, uuid.as_bytes())
+        .map_err(|error| error.to_string())?;
+
+    let mut encrypted = encapped_key.to_bytes().to_vec();
+    encrypted.extend(ciphertext);
+
+    Ok(format!("hpke:{}", STANDARD.encode(encrypted)))
 }

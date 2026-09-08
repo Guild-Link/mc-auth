@@ -65,9 +65,6 @@
         font-size: 0.75rem;
         text-align: center;
       }
-      [hidden] {
-        display: none;
-      }
       #error {
         color: #ff8b8b;
       }
@@ -110,7 +107,9 @@
         start.hidden = true;
         error.hidden = true;
         try {
-          const response = await fetch("/auth", { method: "POST" });
+          const response = await fetch(`/auth${location.search}`, {
+            method: "POST",
+          });
           if (!response.ok) throw new Error(await response.text());
 
           const auth = await response.json();
