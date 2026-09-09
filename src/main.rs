@@ -10,36 +10,35 @@ use axum::{
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::{Compression, write::GzEncoder};
-use hpke::{
-    Deserializable, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
-    kem::X25519HkdfSha256, setup_sender,
-};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-type RecipientKey = <X25519HkdfSha256 as hpke::Kem>::PublicKey;
+use crate::crypto::{PublicKey, encrypt_token, parse_public_key};
+
+mod crypto;
+
 const RESULT_TTL: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 struct AppState {
-    client: reqwest::Client,
     sessions: Arc<Mutex<HashMap<Uuid, AuthStatus>>>,
+    client: reqwest::Client,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum AuthStatus {
-    Pending,
-    Failed { error: String },
     Complete { token: String },
+    Failed { error: String },
+    Pending,
 }
 
 #[derive(Serialize)]
 struct StartResponse {
-    session: Uuid,
-    user_code: String,
     verification_uri: String,
+    user_code: String,
+    session: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -50,8 +49,8 @@ struct StartQuery {
 
 #[derive(Serialize)]
 struct AccountToken {
-    uuid: Uuid,
     token: String,
+    uuid: Uuid,
 }
 
 #[tokio::main]
@@ -107,6 +106,7 @@ async fn start_auth(
         .lock()
         .await
         .insert(session, AuthStatus::Pending);
+
     tokio::spawn(async move {
         let status = match azalea_auth::get_ms_auth_token(&state.client, code, None).await {
             Ok(msa) => encode_token(&state.client, msa, public_key.as_ref())
@@ -145,7 +145,7 @@ async fn auth_status(
 async fn encode_token(
     client: &reqwest::Client,
     msa: ExpiringValue<AccessTokenResponse>,
-    public_key: Option<&RecipientKey>,
+    public_key: Option<&PublicKey>,
 ) -> Result<String, String> {
     let minecraft = azalea_auth::get_minecraft_token(client, &msa.data.access_token)
         .await
@@ -155,10 +155,9 @@ async fn encode_token(
         .await
         .map_err(|error| error.to_string())?;
 
-    let token = serde_json::to_vec(&msa).map_err(|error| error.to_string())?;
     let token = match public_key {
-        Some(public_key) => encrypt(&token, &profile.id, public_key)?,
-        None => STANDARD.encode(token),
+        Some(public_key) => encrypt_token(&msa, &profile.id, public_key)?,
+        None => STANDARD.encode(serde_json::to_vec(&msa).map_err(|error| error.to_string())?),
     };
 
     encode_compressed(&AccountToken {
@@ -170,40 +169,7 @@ async fn encode_token(
 fn encode_compressed(value: &impl Serialize) -> Result<String, String> {
     let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
     serde_json::to_writer(&mut gzip, value).map_err(|error| error.to_string())?;
-    
+
     let compressed = gzip.finish().map_err(|error| error.to_string())?;
     Ok(STANDARD.encode(compressed))
-}
-
-fn parse_public_key(encoded: &str) -> Result<RecipientKey, String> {
-    if encoded.len() != 64 || !encoded.is_ascii() {
-        return Err("pubKey must be a 64-character hexadecimal X25519 public key".into());
-    }
-
-    let mut bytes = [0; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "pubKey must be a 64-character hexadecimal X25519 public key")?;
-    }
-
-    RecipientKey::from_bytes(&bytes).map_err(|error| error.to_string())
-}
-
-fn encrypt(token: &[u8], uuid: &Uuid, public_key: &RecipientKey) -> Result<String, String> {
-    let (encapped_key, mut sender) =
-        setup_sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-            &OpModeS::Base,
-            public_key,
-            b"",
-        )
-        .map_err(|error| error.to_string())?;
-
-    let ciphertext = sender
-        .seal(token, uuid.as_bytes())
-        .map_err(|error| error.to_string())?;
-
-    let mut encrypted = encapped_key.to_bytes().to_vec();
-    encrypted.extend(ciphertext);
-
-    Ok(format!("hpke:{}", STANDARD.encode(encrypted)))
 }
