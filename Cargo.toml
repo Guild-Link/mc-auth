@@ -8,6 +8,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 azalea-auth = "0.16"
 base64 = "0.22"
 flate2 = "1"
+hex = "0.4"
 hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 serde = { version = "1", features = ["derive"] }

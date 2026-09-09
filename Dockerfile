@@ -1,9 +1,13 @@
-FROM rustlang/rust:nightly-alpine AS build
+FROM rust:alpine AS build
 
-RUN apk add --no-cache cmake make
+ENV RUSTUP_TOOLCHAIN=nightly-2026-09-08
+RUN apk add --no-cache cmake make \
+    && rustup toolchain install nightly-2026-09-08 --profile minimal
+
 WORKDIR /app
 COPY src ./src
 COPY Cargo.toml Cargo.lock ./
+
 RUN cargo build --locked --release
 
 FROM scratch

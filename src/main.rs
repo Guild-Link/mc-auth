@@ -56,27 +56,26 @@ struct AccountToken {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
-        client: reqwest::Client::new(),
         sessions: Default::default(),
+        client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?,
     };
 
     let app = Router::new()
-        .route("/", get(index))
-        .route("/auth", post(start_auth))
+        .route("/", get(|| async { Html(include_str!("index.html")) }))
         .route("/auth/{session}", get(auth_status))
+        .route("/auth", post(start_auth))
         .with_state(state);
 
-    let port = env::var("PORT").unwrap_or_else(|_| "3000".into());
-    let address = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&address).await?;
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "3000".into())
+        .parse::<u16>()?;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
 
-    println!("listening on http://{address}");
+    println!("listening on http://0.0.0.0:{port}");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn index() -> Html<&'static str> {
-    Html(include_str!("index.html"))
 }
 
 async fn start_auth(
@@ -128,16 +127,14 @@ async fn start_auth(
 async fn auth_status(
     State(state): State<AppState>,
     Path(session): Path<Uuid>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let mut sessions = state.sessions.lock().await;
-    let status = sessions
+) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+    let status = state
+        .sessions
+        .lock()
+        .await
         .get(&session)
         .cloned()
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if !matches!(&status, AuthStatus::Pending) {
-        sessions.remove(&session);
-    }
+        .ok_or((StatusCode::NOT_FOUND, "Session not found or expired"))?;
 
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(status)))
 }
@@ -156,7 +153,7 @@ async fn encode_token(
         .map_err(|error| error.to_string())?;
 
     let token = match public_key {
-        Some(public_key) => encrypt_token(&msa, &profile.id, public_key)?,
+        Some(public_key) => encrypt_token(&msa, profile.id.as_bytes(), public_key)?,
         None => STANDARD.encode(serde_json::to_vec(&msa).map_err(|error| error.to_string())?),
     };
 
