@@ -49,6 +49,7 @@ struct StartQuery {
 
 #[derive(Serialize)]
 struct AccountToken {
+    username: String,
     token: String,
     uuid: Uuid,
 }
@@ -152,12 +153,14 @@ async fn encode_token(
         .await
         .map_err(|error| error.to_string())?;
 
+    let auth = (msa, minecraft.minecraft_access_token);
     let token = match public_key {
-        Some(public_key) => encrypt_token(&msa, profile.id.as_bytes(), public_key)?,
-        None => STANDARD.encode(serde_json::to_vec(&msa).map_err(|error| error.to_string())?),
+        Some(public_key) => encrypt_token(&auth, profile.id.as_bytes(), public_key)?,
+        None => STANDARD.encode(serde_json::to_vec(&auth).map_err(|e| e.to_string())?),
     };
 
     encode_compressed(&AccountToken {
+        username: profile.name,
         uuid: profile.id,
         token,
     })

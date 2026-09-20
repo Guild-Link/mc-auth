@@ -5,10 +5,11 @@ use hpke::{
     kem::X25519HkdfSha256, single_shot_seal,
 };
 
-type Token = ExpiringValue<AccessTokenResponse>;
-type Aead = ChaCha20Poly1305;
 type Kdf = HkdfSha256;
+type Aead = ChaCha20Poly1305;
 type KeyExchange = X25519HkdfSha256;
+type Token = (ExpiringValue<AccessTokenResponse>, String);
+
 pub(crate) type PublicKey = <KeyExchange as Kem>::PublicKey;
 
 pub(crate) fn encrypt_token(
