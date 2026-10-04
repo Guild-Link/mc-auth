@@ -11,7 +11,6 @@ use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::SigningKey;
 use flate2::{Compression, write::GzEncoder};
-use hpke::Serializable;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -58,8 +57,6 @@ struct AccountToken {
     username: String,
     token: String,
     uuid: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token_pub: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -182,7 +179,6 @@ async fn encode_token(
         username: profile.name,
         uuid: profile.id,
         token,
-        token_pub: public_key.map(|key| hex::encode(key.to_bytes())),
     };
 
     let data = serde_json::to_vec(&account).map_err(|error| error.to_string())?;

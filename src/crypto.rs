@@ -1,6 +1,7 @@
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer, SigningKey};
+use flate2::{Compression, write::GzEncoder};
 use hpke::{
     Deserializable, Kem, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
     kem::X25519HkdfSha256, single_shot_seal,
@@ -19,10 +20,12 @@ pub(crate) fn encrypt_token(
     uuid: &[u8; 16],
     public_key: &PublicKey,
 ) -> Result<String, String> {
-    let json = serde_json::to_vec(token).map_err(|error| error.to_string())?;
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
+    serde_json::to_writer(&mut gzip, token).map_err(|error| error.to_string())?;
+    let data = gzip.finish().map_err(|error| error.to_string())?;
 
     let (encapped_key, ciphertext) =
-        single_shot_seal::<Aead, Kdf, KeyExchange>(&OpModeS::Base, public_key, b"", &json, uuid)
+        single_shot_seal::<Aead, Kdf, KeyExchange>(&OpModeS::Base, public_key, b"", &data, uuid)
             .map_err(|error| error.to_string())?;
 
     let encoded = [encapped_key.to_bytes().as_ref(), ciphertext.as_slice()].concat();
