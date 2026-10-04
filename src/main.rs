@@ -9,12 +9,16 @@ use axum::{
 };
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use ed25519_dalek::SigningKey;
 use flate2::{Compression, write::GzEncoder};
+use hpke::Serializable;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::crypto::{PublicKey, encrypt_token, parse_public_key};
+use crate::crypto::{
+    PublicKey, encrypt_token, parse_public_key, parse_signing_key, sign, timestamp,
+};
 
 mod crypto;
 
@@ -24,6 +28,7 @@ const RESULT_TTL: Duration = Duration::from_secs(90);
 struct AppState {
     sessions: Arc<Mutex<HashMap<Uuid, AuthStatus>>>,
     client: reqwest::Client,
+    signing_key: SigningKey,
 }
 
 #[derive(Clone, Serialize)]
@@ -49,14 +54,26 @@ struct StartQuery {
 
 #[derive(Serialize)]
 struct AccountToken {
+    created_at: u64,
     username: String,
     token: String,
     uuid: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_pub: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SignedAccountToken {
+    #[serde(flatten)]
+    account: AccountToken,
+    signature: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = parse_signing_key(&env::var("SIGNING_KEY")?)?;
     let state = AppState {
+        signing_key,
         sessions: Default::default(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -109,7 +126,7 @@ async fn start_auth(
 
     tokio::spawn(async move {
         let status = match azalea_auth::get_ms_auth_token(&state.client, code, None).await {
-            Ok(msa) => encode_token(&state.client, msa, public_key.as_ref())
+            Ok(msa) => encode_token(&state.client, msa, public_key.as_ref(), &state.signing_key)
                 .await
                 .map(|token| AuthStatus::Complete { token })
                 .unwrap_or_else(|error| AuthStatus::Failed { error }),
@@ -144,6 +161,7 @@ async fn encode_token(
     client: &reqwest::Client,
     msa: ExpiringValue<AccessTokenResponse>,
     public_key: Option<&PublicKey>,
+    signing_key: &SigningKey,
 ) -> Result<String, String> {
     let minecraft = azalea_auth::get_minecraft_token(client, &msa.data.access_token)
         .await
@@ -159,10 +177,18 @@ async fn encode_token(
         None => STANDARD.encode(serde_json::to_vec(&auth).map_err(|e| e.to_string())?),
     };
 
-    encode_compressed(&AccountToken {
+    let account = AccountToken {
+        created_at: timestamp(),
         username: profile.name,
         uuid: profile.id,
         token,
+        token_pub: public_key.map(|key| hex::encode(key.to_bytes())),
+    };
+
+    let data = serde_json::to_vec(&account).map_err(|error| error.to_string())?;
+    encode_compressed(&SignedAccountToken {
+        signature: sign(&data, signing_key),
+        account,
     })
 }
 

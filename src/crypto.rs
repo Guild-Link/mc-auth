@@ -1,9 +1,11 @@
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signer, SigningKey};
 use hpke::{
     Deserializable, Kem, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
     kem::X25519HkdfSha256, single_shot_seal,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type Kdf = HkdfSha256;
 type Aead = ChaCha20Poly1305;
@@ -31,4 +33,21 @@ pub(crate) fn parse_public_key(encoded: &str) -> Result<PublicKey, String> {
     let mut bytes = [0; 32];
     hex::decode_to_slice(encoded, &mut bytes).map_err(|_| "invalid public key".to_owned())?;
     PublicKey::from_bytes(&bytes).map_err(|error| error.to_string())
+}
+
+pub(crate) fn parse_signing_key(encoded: &str) -> Result<SigningKey, String> {
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(encoded, &mut bytes).map_err(|_| "invalid signing key".to_owned())?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+pub(crate) fn sign(data: &[u8], private_key: &SigningKey) -> String {
+    STANDARD.encode(private_key.sign(data).to_bytes())
+}
+
+pub(crate) fn timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time is after Unix epoch")
+        .as_millis() as u64
 }
