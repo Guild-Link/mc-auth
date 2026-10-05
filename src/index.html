@@ -108,12 +108,10 @@
         start.hidden = true;
         error.hidden = true;
         try {
-          const response = await fetch(`/auth${location.search}`, {
+          const auth = await fetchJson(`/auth${location.search}`, {
             method: "POST",
           });
-          if (!response.ok) throw new Error(await response.text());
 
-          const auth = await response.json();
           const verificationUrl = new URL(auth.verification_uri);
           verificationUrl.searchParams.set("otc", auth.user_code);
 
@@ -125,16 +123,12 @@
           poll(auth.session);
         } catch (cause) {
           showError(cause);
-          start.hidden = false;
         }
       });
 
       async function poll(session) {
         try {
-          const response = await fetch(`/auth/${session}`);
-          if (!response.ok) throw new Error(await response.text());
-
-          const result = await response.json();
+          const result = await fetchJson(`/auth/${session}`);
           if (result.status === "pending") {
             setTimeout(() => poll(session), 2000);
           } else if (result.status === "complete") {
@@ -156,7 +150,6 @@
           }
         } catch (cause) {
           showError(cause);
-          start.hidden = false;
         }
       }
 
@@ -173,9 +166,16 @@
         event.target.textContent = hidden ? "Hide" : "Show";
       });
 
+      async function fetchJson(url, options) {
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(await response.text());
+        return response.json();
+      }
+
       function showError(cause) {
         error.textContent = cause.message || String(cause);
         error.hidden = false;
+        start.hidden = false;
       }
     </script>
   </body>

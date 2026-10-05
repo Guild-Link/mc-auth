@@ -10,13 +10,12 @@ use axum::{
 use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::SigningKey;
-use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::crypto::{
-    PublicKey, encrypt_token, parse_public_key, parse_signing_key, sign, timestamp,
+    PublicKey, compress_json, encrypt_token, parse_public_key, parse_signing_key, sign, timestamp,
 };
 
 mod crypto;
@@ -182,16 +181,8 @@ async fn encode_token(
     };
 
     let data = serde_json::to_vec(&account).map_err(|error| error.to_string())?;
-    encode_compressed(&SignedAccountToken {
+    Ok(STANDARD.encode(compress_json(&SignedAccountToken {
         signature: sign(&data, signing_key),
         account,
-    })
-}
-
-fn encode_compressed(value: &impl Serialize) -> Result<String, String> {
-    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
-    serde_json::to_writer(&mut gzip, value).map_err(|error| error.to_string())?;
-
-    let compressed = gzip.finish().map_err(|error| error.to_string())?;
-    Ok(STANDARD.encode(compressed))
+    })?))
 }
