@@ -1,56 +1,41 @@
-use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use crypto_box::{PublicKey, aead::OsRng};
 use ed25519_dalek::{Signer, SigningKey};
 use flate2::{Compression, write::GzEncoder};
-use hpke::{
-    Deserializable, Kem, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
-    kem::X25519HkdfSha256, single_shot_seal,
-};
 use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::Write,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-type Kdf = HkdfSha256;
-type Aead = ChaCha20Poly1305;
-type KeyExchange = X25519HkdfSha256;
-type Token = (ExpiringValue<AccessTokenResponse>, String);
+pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Token = (String, String);
 
-pub(crate) type PublicKey = <KeyExchange as Kem>::PublicKey;
+pub(crate) fn encrypt_token(token: &Token, public_key: &PublicKey) -> Result<String, Error> {
+    let sealed = public_key
+        .seal(&mut OsRng, &compress(&serde_json::to_vec(token)?)?)
+        .map_err(|_| "could not encrypt token")?;
 
-pub(crate) fn encrypt_token(
-    token: &Token,
-    uuid: &[u8; 16],
-    public_key: &PublicKey,
-) -> Result<String, String> {
-    let data = compress_json(token)?;
-
-    let (encapped_key, ciphertext) =
-        single_shot_seal::<Aead, Kdf, KeyExchange>(&OpModeS::Base, public_key, b"", &data, uuid)
-            .map_err(|error| error.to_string())?;
-
-    let encoded = [encapped_key.to_bytes().as_ref(), ciphertext.as_slice()].concat();
-    Ok(format!("hpke:{}", STANDARD.encode(encoded)))
+    Ok(STANDARD.encode(sealed))
 }
 
-pub(crate) fn compress_json(value: &impl Serialize) -> Result<Vec<u8>, String> {
-    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
-    serde_json::to_writer(&mut gzip, value).map_err(|error| error.to_string())?;
-    gzip.finish().map_err(|error| error.to_string())
+pub(crate) fn sign(value: &impl Serialize, signing_key: &SigningKey) -> Result<String, Error> {
+    let json = serde_json::to_vec(value)?;
+    let signed = [signing_key.sign(&json).to_bytes().as_slice(), &json].concat();
+    Ok(STANDARD.encode(compress(&signed)?))
 }
 
-pub(crate) fn parse_public_key(encoded: &str) -> Result<PublicKey, String> {
-    let mut bytes = [0; 32];
-    hex::decode_to_slice(encoded, &mut bytes).map_err(|_| "invalid public key".to_owned())?;
-    PublicKey::from_bytes(&bytes).map_err(|error| error.to_string())
+pub(crate) fn parse_public_key(encoded: &str) -> Result<PublicKey, Error> {
+    let bytes = decode_key(encoded).ok_or("invalid public key")?;
+    Ok(PublicKey::from_bytes(bytes))
 }
 
-pub(crate) fn parse_signing_key(encoded: &str) -> Result<SigningKey, String> {
-    let mut bytes = [0; 32];
-    hex::decode_to_slice(encoded, &mut bytes).map_err(|_| "invalid signing key".to_owned())?;
+pub(crate) fn parse_signing_key(encoded: &str) -> Result<SigningKey, Error> {
+    let bytes = decode_key(encoded).ok_or("invalid signing key")?;
     Ok(SigningKey::from_bytes(&bytes))
-}
-
-pub(crate) fn sign(data: &[u8], private_key: &SigningKey) -> String {
-    STANDARD.encode(private_key.sign(data).to_bytes())
 }
 
 pub(crate) fn timestamp() -> u64 {
@@ -58,4 +43,15 @@ pub(crate) fn timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("time is after Unix epoch")
         .as_millis() as u64
+}
+
+fn decode_key(encoded: &str) -> Option<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(encoded.trim_end_matches('=')).ok()?;
+    bytes.try_into().ok()
+}
+
+fn compress(data: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
+    gzip.write_all(data)?;
+    Ok(gzip.finish()?)
 }

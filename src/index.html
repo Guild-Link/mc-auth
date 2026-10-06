@@ -10,21 +10,21 @@
         font-family: system-ui, sans-serif;
       }
       body {
+        box-sizing: border-box;
+        display: grid;
+        grid-template-rows: 1fr auto;
         min-height: 100vh;
         max-width: 36rem;
         margin: 0 auto;
         padding: 0 1.25rem;
         background: #111;
         color: #eee;
-        display: grid;
-        grid-template-rows: 1fr auto;
-        box-sizing: border-box;
       }
       main {
         align-self: center;
+        padding: 1.5rem;
         border: 1px solid #333;
         border-radius: 8px;
-        padding: 1.5rem;
         background: #191919;
       }
       h1 {
@@ -32,22 +32,18 @@
         font-size: 1.4rem;
         text-align: center;
       }
-      button,
       a {
         color: inherit;
       }
       button {
         width: 100%;
+        margin-top: 0.5rem;
         padding: 0.75rem 1rem;
         border: 0;
         border-radius: 4px;
         background: #3c8527;
+        color: inherit;
         cursor: pointer;
-      }
-      .code {
-        margin: 1.25rem 0;
-        font: 1.8rem monospace;
-        letter-spacing: 0.12em;
       }
       input {
         box-sizing: border-box;
@@ -55,14 +51,30 @@
         margin: 0.5rem 0;
         padding: 0.75rem;
       }
-      #show {
-        margin-bottom: 0.5rem;
-        background: #333;
+      #code {
+        margin: 1.25rem 0;
+        font: 1.8rem monospace;
+        letter-spacing: 0.12em;
+      }
+      #advanced,
+      footer {
+        color: #888;
+        font-size: 0.75rem;
+      }
+      #advanced {
+        margin-top: 0.75rem;
+        cursor: pointer;
+      }
+      #key {
+        padding: 0.5rem;
+        border: 1px solid #333;
+        border-radius: 4px;
+        background: #111;
+        color: #aaa;
+        font: 0.75rem monospace;
       }
       footer {
         padding: 1rem 0;
-        color: #888;
-        font-size: 0.75rem;
         text-align: center;
       }
       #error {
@@ -73,7 +85,14 @@
   <body>
     <main>
       <h1>Minecraft Token Fetcher</h1>
-      <button id="start">Login With Microsoft</button>
+
+      <section id="setup">
+        <button id="start">Login With Microsoft</button>
+        <details id="advanced">
+          <summary>Encryption key</summary>
+          <input id="key" spellcheck="false" autocomplete="off" />
+        </details>
+      </section>
 
       <section id="login" hidden>
         <p>
@@ -81,14 +100,12 @@
           <a id="link" target="_blank" rel="noreferrer">Microsoft sign-in</a>
           and enter:
         </p>
-        <div id="code" class="code"></div>
+        <div id="code"></div>
         <p>Waiting for authentication...</p>
       </section>
 
       <section id="complete" hidden>
-        <p id="encryption-status" style="text-align: center"></p>
-        <input id="token" type="password" readonly />
-        <button id="show">Show</button>
+        <input id="token" readonly />
         <button id="copy">Copy</button>
       </section>
 
@@ -98,85 +115,55 @@
       This page is not affiliated with Mojang/Microsoft/Minecraft.
     </footer>
     <script>
-      const complete = document.querySelector("#complete");
-      const token = document.querySelector("#token");
-      const start = document.querySelector("#start");
-      const login = document.querySelector("#login");
-      const error = document.querySelector("#error");
+      const $ = (id) => document.getElementById(id);
 
-      start.addEventListener("click", async () => {
-        start.hidden = true;
-        error.hidden = true;
+      $("key").value = new URLSearchParams(location.search).get("key") ?? "";
+      $("advanced").open = !$("key").value;
+
+      $("start").onclick = async () => {
+        $("setup").hidden = true;
+        $("error").hidden = true;
+
         try {
-          const auth = await fetchJson(`/auth${location.search}`, {
+          const start = await fetch("/start", {
             method: "POST",
+            body: $("key").value,
           });
 
-          const verificationUrl = new URL(auth.verification_uri);
-          verificationUrl.searchParams.set("otc", auth.user_code);
+          if (!start.ok) throw new Error(await start.text());
+          const auth = await start.json();
 
-          document.querySelector("#link").href = verificationUrl;
-          document.querySelector("#code").textContent = auth.user_code;
+          const url = new URL(auth.verification_uri);
+          url.searchParams.set("otc", auth.user_code);
+          window.open(url, "_blank", "noopener");
 
-          login.hidden = false;
-          window.open(verificationUrl, "_blank", "noopener");
-          poll(auth.session);
-        } catch (cause) {
-          showError(cause);
+          $("code").textContent = auth.user_code;
+          $("login").hidden = false;
+          $("link").href = url;
+
+          let response;
+          do {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            response = await fetch("/status", {
+              method: "POST",
+              body: auth.session,
+            });
+          } while (response.status === 202);
+
+          if (!response.ok) throw new Error(await response.text());
+
+          $("token").value = await response.text();
+          $("complete").hidden = false;
+          $("login").hidden = true;
+        } catch (e) {
+          $("error").textContent = e.message;
+          $("setup").hidden = false;
+          $("error").hidden = false;
+          $("login").hidden = true;
         }
-      });
+      };
 
-      async function poll(session) {
-        try {
-          const result = await fetchJson(`/auth/${session}`);
-          if (result.status === "pending") {
-            setTimeout(() => poll(session), 2000);
-          } else if (result.status === "complete") {
-            login.hidden = true;
-            complete.hidden = false;
-            token.value = result.token;
-
-            const encrypted = new URLSearchParams(location.search).has(
-              "pubKey",
-            );
-
-            const status = document.querySelector("#encryption-status");
-            status.style.color = encrypted ? "#6bd968" : "#ff8b8b";
-            status.textContent = encrypted
-              ? "This token is encrypted."
-              : "This token is NOT encrypted!";
-          } else {
-            throw new Error(result.error);
-          }
-        } catch (cause) {
-          showError(cause);
-        }
-      }
-
-      document
-        .querySelector("#copy")
-        .addEventListener("click", async (event) => {
-          await navigator.clipboard.writeText(token.value);
-          event.target.textContent = "Copied";
-        });
-
-      document.querySelector("#show").addEventListener("click", (event) => {
-        const hidden = token.type === "password";
-        token.type = hidden ? "text" : "password";
-        event.target.textContent = hidden ? "Hide" : "Show";
-      });
-
-      async function fetchJson(url, options) {
-        const response = await fetch(url, options);
-        if (!response.ok) throw new Error(await response.text());
-        return response.json();
-      }
-
-      function showError(cause) {
-        error.textContent = cause.message || String(cause);
-        error.hidden = false;
-        start.hidden = false;
-      }
+      $("copy").onclick = () => navigator.clipboard.writeText($("token").value);
     </script>
   </body>
 </html>

@@ -2,21 +2,19 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
-    response::{Html, IntoResponse},
+    extract::State,
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use azalea_auth::{AccessTokenResponse, cache::ExpiringValue};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use azalea_auth::DeviceCodeResponse;
+use crypto_box::PublicKey;
 use ed25519_dalek::SigningKey;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::crypto::{
-    PublicKey, compress_json, encrypt_token, parse_public_key, parse_signing_key, sign, timestamp,
-};
+use crate::crypto::{Error, encrypt_token, parse_public_key, parse_signing_key, sign, timestamp};
 
 mod crypto;
 
@@ -24,30 +22,18 @@ const RESULT_TTL: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 struct AppState {
-    sessions: Arc<Mutex<HashMap<Uuid, AuthStatus>>>,
+    sessions: Arc<Mutex<HashMap<Uuid, Status>>>,
     client: reqwest::Client,
     signing_key: SigningKey,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum AuthStatus {
-    Complete { token: String },
-    Failed { error: String },
-    Pending,
-}
+type Status = Option<Result<String, String>>;
 
 #[derive(Serialize)]
 struct StartResponse {
     verification_uri: String,
     user_code: String,
     session: Uuid,
-}
-
-#[derive(Deserialize)]
-struct StartQuery {
-    #[serde(rename = "pubKey")]
-    pub_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -58,50 +44,35 @@ struct AccountToken {
     uuid: Uuid,
 }
 
-#[derive(Serialize)]
-struct SignedAccountToken {
-    #[serde(flatten)]
-    account: AccountToken,
-    signature: String,
-}
-
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = parse_signing_key(&env::var("SIGNING_KEY")?)?;
+async fn main() -> Result<(), Error> {
     let state = AppState {
-        signing_key,
-        sessions: Default::default(),
+        signing_key: parse_signing_key(&env::var("SIGNING_KEY")?)?,
+        sessions: Arc::default(),
         client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(15))
             .build()?,
     };
 
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("index.html")) }))
-        .route("/auth/{session}", get(auth_status))
-        .route("/auth", post(start_auth))
+        .route("/status", post(auth_status))
+        .route("/start", post(start_auth))
         .with_state(state);
 
-    let port = env::var("PORT")
-        .unwrap_or_else(|_| "3000".into())
-        .parse::<u16>()?;
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    let port = env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
 
     println!("listening on http://0.0.0.0:{port}");
-    axum::serve(listener, app).await?;
-    Ok(())
+    Ok(axum::serve(listener, app).await?)
 }
 
 async fn start_auth(
     State(state): State<AppState>,
-    Query(query): Query<StartQuery>,
+    key: String,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let public_key = query
-        .pub_key
-        .as_deref()
-        .map(parse_public_key)
-        .transpose()
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let public_key =
+        parse_public_key(&key).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
 
     let code = azalea_auth::get_ms_link_code(&state.client, None, None)
         .await
@@ -109,80 +80,56 @@ async fn start_auth(
 
     let session = Uuid::new_v4();
     let response = StartResponse {
-        session,
         verification_uri: code.verification_uri.clone(),
         user_code: code.user_code.clone(),
+        session,
     };
 
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(session, AuthStatus::Pending);
+    state.sessions.lock().await.insert(session, None);
 
     tokio::spawn(async move {
-        let status = match azalea_auth::get_ms_auth_token(&state.client, code, None).await {
-            Ok(msa) => encode_token(&state.client, msa, public_key.as_ref(), &state.signing_key)
-                .await
-                .map(|token| AuthStatus::Complete { token })
-                .unwrap_or_else(|error| AuthStatus::Failed { error }),
-            Err(error) => AuthStatus::Failed {
-                error: error.to_string(),
-            },
-        };
-        state.sessions.lock().await.insert(session, status);
+        let status = fetch_account(&state, code, public_key)
+            .await
+            .map_err(|error| error.to_string());
+
+        state.sessions.lock().await.insert(session, Some(status));
         tokio::time::sleep(RESULT_TTL).await;
         state.sessions.lock().await.remove(&session);
     });
 
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)))
+    Ok(Json(response))
 }
 
-async fn auth_status(
-    State(state): State<AppState>,
-    Path(session): Path<Uuid>,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
-    let status = state
-        .sessions
-        .lock()
-        .await
-        .get(&session)
-        .cloned()
-        .ok_or((StatusCode::NOT_FOUND, "Session not found or expired"))?;
-
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(status)))
-}
-
-async fn encode_token(
-    client: &reqwest::Client,
-    msa: ExpiringValue<AccessTokenResponse>,
-    public_key: Option<&PublicKey>,
-    signing_key: &SigningKey,
-) -> Result<String, String> {
-    let minecraft = azalea_auth::get_minecraft_token(client, &msa.data.access_token)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let profile = azalea_auth::get_profile(client, &minecraft.minecraft_access_token)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let auth = (msa, minecraft.minecraft_access_token);
-    let token = match public_key {
-        Some(public_key) => encrypt_token(&auth, profile.id.as_bytes(), public_key)?,
-        None => STANDARD.encode(serde_json::to_vec(&auth).map_err(|e| e.to_string())?),
+async fn auth_status(State(state): State<AppState>, session: String) -> Response {
+    let Ok(session) = Uuid::parse_str(&session) else {
+        return (StatusCode::BAD_REQUEST, "invalid session").into_response();
     };
 
+    match state.sessions.lock().await.get(&session).cloned() {
+        None => (StatusCode::NOT_FOUND, "Session not found or expired").into_response(),
+        Some(None) => StatusCode::ACCEPTED.into_response(),
+        Some(Some(Ok(token))) => token.into_response(),
+        Some(Some(Err(error))) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
+}
+
+async fn fetch_account(
+    state: &AppState,
+    code: DeviceCodeResponse,
+    public_key: PublicKey,
+) -> Result<String, Error> {
+    let client = &state.client;
+    let msa = azalea_auth::get_ms_auth_token(client, code, None).await?;
+    let mc = azalea_auth::get_minecraft_token(client, &msa.data.access_token).await?;
+    let profile = azalea_auth::get_profile(client, &mc.minecraft_access_token).await?;
+
+    let auth = (msa.data.refresh_token, mc.minecraft_access_token);
     let account = AccountToken {
+        token: encrypt_token(&auth, &public_key)?,
         created_at: timestamp(),
         username: profile.name,
         uuid: profile.id,
-        token,
     };
 
-    let data = serde_json::to_vec(&account).map_err(|error| error.to_string())?;
-    Ok(STANDARD.encode(compress_json(&SignedAccountToken {
-        signature: sign(&data, signing_key),
-        account,
-    })?))
+    sign(&account, &state.signing_key)
 }
