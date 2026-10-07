@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use azalea_auth::DeviceCodeResponse;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use crypto_box::PublicKey;
 use ed25519_dalek::SigningKey;
 use serde::Serialize;
@@ -42,12 +43,13 @@ struct AccountToken {
     username: String,
     token: String,
     uuid: Uuid,
+    key: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let state = AppState {
-        signing_key: parse_signing_key(&env::var("SIGNING_KEY")?)?,
+        signing_key: parse_signing_key(&env::var("KEY")?)?,
         sessions: Arc::default(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -125,6 +127,7 @@ async fn fetch_account(
 
     let auth = (msa.data.refresh_token, mc.minecraft_access_token);
     let account = AccountToken {
+        key: URL_SAFE_NO_PAD.encode(public_key.as_bytes()),
         token: encrypt_token(&auth, &public_key)?,
         created_at: timestamp(),
         username: profile.name,
